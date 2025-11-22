@@ -1,6 +1,6 @@
 __all__ = ['map_sites', 'get_site_annotations', 'MappedSite',
            'InvalidSiteException', 'ProtMapper', 'default_mapper',
-           'resource_dir']
+           'resource_dir', 'mapped_sites_to_sites']
 
 
 __version__ = '0.0.29'

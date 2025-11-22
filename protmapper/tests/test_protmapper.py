@@ -466,3 +466,34 @@ def test_mutliple_up_ids():
     pm = ProtMapper()
     ms = pm.map_peptide_to_human_ref('TMPO', 'hgnc', 'RKVPRLSEKSVEE', 7)
     assert ms.up_id == 'P42166'
+
+
+def test_no_psp_check():
+    pm = ProtMapper()
+
+    # Signal peptide
+    ms = pm.map_to_human_ref('TTR', 'hgnc', 'S', '52',
+                             check_psp=False)
+    assert ms == MappedSite(up_id='P02766', error_code=None, valid=False,
+                            orig_res='S', orig_pos='52', mapped_id='P02766',
+                            mapped_res='S', mapped_pos='72',
+                            description='SIGNAL_PEPTIDE_REMOVED',
+                            gene_name='TTR')
+    # Initial methionine
+    ms = pm.map_to_human_ref('TTR', 'hgnc', 'S', '71',
+                             check_psp=False)
+    assert ms == MappedSite(up_id='P02766', error_code=None, valid=False,
+                            orig_res='S', orig_pos='71', mapped_id='P02766',
+                            mapped_res='S', mapped_pos='72',
+                            description='INFERRED_METHIONINE_CLEAVAGE',
+                            gene_name='TTR')
+
+    # A site that doesn't map to anything valid which is detected
+    # even without PSP checking
+    ms = pm.map_to_human_ref('TTR', 'hgnc', 'S', '73',
+                             check_psp=False)
+    assert ms == MappedSite(up_id='P02766', error_code=None, valid=False,
+                            orig_res='S', orig_pos='73', mapped_id=None,
+                            mapped_res=None, mapped_pos=None,
+                            description='NO_MAPPING_FOUND',
+                            gene_name='TTR')

@@ -1,5 +1,6 @@
 __all__ = ['map_sites', 'get_site_annotations', 'MappedSite',
-           'InvalidSiteException', 'ProtMapper', 'default_mapper']
+           'InvalidSiteException', 'ProtMapper', 'default_mapper',
+           'mapped_sites_to_sites']
 
 import os
 import csv
@@ -171,22 +172,45 @@ class MappedSite(object):
         return (not self.not_invalid()) and \
             (self.mapped_pos is not None and self.mapped_res is not None)
 
-    def get_site(self):
+    def get_site(self, namespace='uniprot', include_namespace=True):
         """Return the site information as a tuple.
+
+        Parameters
+        ----------
+        namespace : Optional[str]
+            The namespace to use for the protein ID. Default is 'uniprot'.
+            If choosing 'hgnc', the gene name will be used as the ID.
+        include_namespace : Optional[bool]
+            If True, include the namespace in the output. Default is True
+            which creates a 4 tuple of the form
+            (prot_id, prot_ns, residue, position). If False, a 3 tuple is
+            created of the form (prot_id, residue, position).
 
         Returns
         -------
         tuple
             A tuple containing the following entries:
-            (prot_id, prot_ns, residue, position).
+            (prot_id, prot_ns, residue, position) if include_namespace is True,
+            (prot_id, residue, position) otherwise.
         """
+        if namespace not in ('uniprot', 'hgnc'):
+            raise ValueError("Namespace must be 'uniprot' or 'hgnc'.")
         if self.not_invalid() or not self.has_mapping():
-            return self.up_id, 'uniprot', self.orig_res, self.orig_pos
+            idx = self.up_id if namespace == 'uniprot' else self.gene_name
+            res = self.orig_res
+            pos = self.orig_pos
         else:
-            return self.mapped_id, 'uniprot', self.mapped_res, self.mapped_pos
+            idx = self.mapped_id if namespace == 'uniprot' else self.gene_name
+            res = self.mapped_res
+            pos = self.mapped_pos
+        if include_namespace:
+            return idx, namespace, res, pos
+        else:
+            return idx, res, pos
 
 
-def mapped_sites_to_sites(mapped_sites, include_invalid=False):
+def mapped_sites_to_sites(mapped_sites, include_invalid=False,
+                          namespace='uniprot', include_namespace=True):
     """Return a list of sites from a list of MappedSite objects.
 
     Parameters
@@ -196,6 +220,14 @@ def mapped_sites_to_sites(mapped_sites, include_invalid=False):
     include_invalid : Optional[bool]
         If True, include sites that are known to be invalid in the output.
         Default is False.
+    namespace : Optional[str]
+        The namespace to use for the protein ID. Default is 'uniprot'.
+        If choosing 'hgnc', the gene name will be used as the ID.
+    include_namespace : Optional[bool]
+        If True, include the namespace in the output. Default is True
+        which creates a 4 tuple of the form
+        (prot_id, prot_ns, residue, position). If False, a 3 tuple is
+        created of the form (prot_id, residue, position).
 
     Returns
     -------
@@ -203,7 +235,9 @@ def mapped_sites_to_sites(mapped_sites, include_invalid=False):
         A list of tuples, each containing the following entries:
         (prot_id, prot_ns, residue, position).
     """
-    return [ms.get_site() for ms in mapped_sites
+    return [ms.get_site(namespace=namespace,
+                        include_namespace=include_namespace)
+            for ms in mapped_sites
             if ms.not_invalid() or include_invalid]
 
 
@@ -214,8 +248,11 @@ def get_site_annotations(sites):
     ----------
     sites : list of tuple
         Each tuple in the list consists of the following entries:
-        (prot_id, residue, position). where prot_id has to be a
-        UniProt ID.
+        (prot_id, prot_ns, residue, position). where prot_id
+        is the protein ID (Uniprot or HGNC), prot_ns is the namespace
+        of the protein ID ('uniprot' or 'hgnc'), residue is the amino acid
+        residue, and position is the amino acid position, both represented
+        as strings.
 
     Returns
     -------
@@ -247,9 +284,13 @@ def _load_annotations():
     with open(annotations_fname, 'r') as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            site = (row['TARGET_UP_ID'], row['TARGET_RES'], row['TARGET_POS'])
+            site_up = (row['TARGET_UP_ID'], 'uniprot',
+                       row['TARGET_RES'], row['TARGET_POS'])
+            site_hgnc = (row['TARGET_GENE_NAME'], 'hgnc',
+                         row['TARGET_RES'], row['TARGET_POS'])
             row['evidence'] = evidences.get(row['ID'])
-            annotations_by_site[site].append(row)
+            annotations_by_site[site_up].append(row)
+            annotations_by_site[site_hgnc].append(row)
     annotations_by_site = dict(annotations_by_site)
     return annotations_by_site
 
@@ -389,7 +430,8 @@ class ProtMapper(object):
     def map_to_human_ref(self, prot_id, prot_ns, residue, position,
                          do_methionine_offset=True,
                          do_orthology_mapping=True,
-                         do_isoform_mapping=True):
+                         do_isoform_mapping=True,
+                         check_psp=True):
         """Check an agent for invalid sites and look for mappings.
 
         Look up each modification site on the agent in Uniprot and then the
@@ -499,30 +541,43 @@ class ProtMapper(object):
             self._cache[site_key] = mapped_site
             return mapped_site
 
-        # There is no manual mapping, next we try to see if UniProt
-        # reports a signal peptide that could be responsible for the position
-        # being shifted
-        signal_peptide = uniprot_client.get_signal_peptide(up_id, False)
-        # If there is valid signal peptide information from UniProt
-        if signal_peptide and signal_peptide.begin == 1 and \
-                signal_peptide.end is not None:
-            offset_pos = str(int(position) + signal_peptide.end)
-            # Check to see if the offset position is known to be phosphorylated
-            mapped_site = self.get_psp_mapping(
-                                up_id, up_id, gene_name, residue, position,
-                                offset_pos, 'SIGNAL_PEPTIDE_REMOVED')
-            if mapped_site:
-                return mapped_site
         # ...there's no manually curated site or signal peptide, so do mapping
         # via PhosphoSite if the data is available:
         human_prot = uniprot_client.is_human(up_id)
-        if phosphosite_client.has_data():
+        mapped_site = None
+        if phosphosite_client.has_data() or not check_psp:
+            # See if UniProt reports a signal peptide that could be responsible
+            # for the position being shifted
+            signal_peptide = uniprot_client.get_signal_peptide(up_id, False)
+            # If there is valid signal peptide information from UniProt
+            if signal_peptide and signal_peptide.begin == 1 and \
+                    signal_peptide.end is not None:
+                offset_pos = str(int(position) + signal_peptide.end)
+                # Check to see if the offset position is known to be phosphorylated
+                if check_psp:
+                    mapped_site = self.get_psp_mapping(
+                        up_id, up_id, gene_name, residue, position,
+                        offset_pos, 'SIGNAL_PEPTIDE_REMOVED')
+                else:
+                    site_valid = uniprot_client.verify_location(up_id, residue,
+                                                                offset_pos)
+                    if site_valid:
+                        mapped_site = MappedSite(
+                            up_id, False, residue, position,
+                            mapped_id=up_id,
+                            mapped_res=residue,
+                            mapped_pos=offset_pos,
+                            description='SIGNAL_PEPTIDE_REMOVED',
+                            gene_name=gene_name)
+                if mapped_site:
+                    return mapped_site
             # First, look for other entries in phosphosite for this protein
             # where this sequence position is legit (i.e., other isoforms)
             if do_isoform_mapping and up_id and human_prot:
-                mapped_site = self.get_psp_mapping(
-                        up_id, up_id, gene_name, residue, position, position,
-                        'INFERRED_ALTERNATIVE_ISOFORM')
+                if check_psp:
+                    mapped_site = self.get_psp_mapping(
+                            up_id, up_id, gene_name, residue, position, position,
+                            'INFERRED_ALTERNATIVE_ISOFORM')
                 if mapped_site:
                     return mapped_site
             # Try looking for rat or mouse sites
@@ -530,24 +585,38 @@ class ProtMapper(object):
                 # Get the mouse ID for this protein
                 up_mouse = uniprot_client.get_mouse_id(up_id)
                 # Get mouse sequence
-                mapped_site = self.get_psp_mapping(
-                                    up_id, up_mouse, gene_name, residue,
-                                    position, position, 'INFERRED_MOUSE_SITE')
+                if check_psp:
+                    mapped_site = self.get_psp_mapping(
+                                        up_id, up_mouse, gene_name, residue,
+                                        position, position, 'INFERRED_MOUSE_SITE')
                 if mapped_site:
                     return mapped_site
                 # Try the rat sequence
                 up_rat = uniprot_client.get_rat_id(up_id)
-                mapped_site = self.get_psp_mapping(
-                                    up_id, up_rat, gene_name, residue, position,
-                                    position, 'INFERRED_RAT_SITE')
+                if check_psp:
+                    mapped_site = self.get_psp_mapping(
+                                        up_id, up_rat, gene_name, residue, position,
+                                        position, 'INFERRED_RAT_SITE')
                 if mapped_site:
                     return mapped_site
             # Check for methionine offset (off by one)
             if do_methionine_offset and up_id and human_prot:
                 offset_pos = str(int(position) + 1)
-                mapped_site = self.get_psp_mapping(
-                                    up_id, up_id, gene_name, residue, position,
-                                    offset_pos, 'INFERRED_METHIONINE_CLEAVAGE')
+                if check_psp:
+                    mapped_site = self.get_psp_mapping(
+                                        up_id, up_id, gene_name, residue, position,
+                                        offset_pos, 'INFERRED_METHIONINE_CLEAVAGE')
+                else:
+                    site_valid = uniprot_client.verify_location(
+                                        up_id, residue, offset_pos)
+                    if site_valid:
+                        mapped_site = MappedSite(
+                            up_id, False, residue, position,
+                            mapped_id=up_id,
+                            mapped_res=residue,
+                            mapped_pos=offset_pos,
+                            description='INFERRED_METHIONINE_CLEAVAGE',
+                            gene_name=gene_name)
                 if mapped_site:
                     return mapped_site
         # If we've gotten here, the entry is 1) not in the site map, and
